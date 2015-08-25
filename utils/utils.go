@@ -8,7 +8,7 @@
 #   LastChange: 2015-08-14 11:37:10
 #      History:
 =============================================================================*/
-package gotools
+package utils
 
 
 func PutUVarint(x uint) []byte {

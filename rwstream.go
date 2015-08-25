@@ -1,25 +1,38 @@
 /*=============================================================================
 #     FileName: rwstream.go
-#         Desc: RWStream struct
-#       Author: sunminghong
-#        Email: allen.fantasy@gmail.com
-#     HomePage: http://weibo.com/5d13
-#      Version: 0.0.1
-#   LastChange: 2015-08-14 11:37:10
+#       Author: sunminghong, allen.fantasy@gmail.com, http://weibo.com/5d13
+#         Team: http://1201.us
+#   LastChange: 2015-08-25 16:09:39
 #      History:
 =============================================================================*/
+
+
+/*
+
+*/
+
 package gotools
 
 import (
     "encoding/binary"
     "errors"
-    //"fmt"
 )
+
 
 const (
     BigEndian    = 0
     LittleEndian = 1
 )
+
+func GetEndianer(endian int) IEndianer {
+    if endian == BigEndian {
+        return binary.BigEndian
+    } else {
+        return binary.LittleEndian
+    }
+}
+
+
 
 //switch bigEndianer or littleEndianer
 type IEndianer interface {
@@ -38,7 +51,7 @@ type IEndianer interface {
 type RWStream struct {
     buffSize int
 
-    Endian   int //default to false, means that is littleEdian
+    //Endian   int //default to false, means that is littleEdian
     Endianer IEndianer
 
     buf []byte // contents are the bytes buf[off:len(buf)]
@@ -48,15 +61,18 @@ type RWStream struct {
     last int // last read operation, so that Unread* can work correctly.
 }
 
-func NewRWStream(buf interface{}, endian int) *RWStream {
-    b := &RWStream{Endian: endian}
+func NewRWStream(buf interface{}, endianer IEndianer) *RWStream {
+    b := &RWStream{Endianer: endianer}
 
+    b.Endianer = endianer
+    /*
     b.Endian = endian
     if endian == BigEndian {
         b.Endianer = binary.BigEndian
     } else {
         b.Endianer = binary.LittleEndian
     }
+    */
 
     b.Init(buf)
     return b
@@ -156,23 +172,10 @@ func (b *RWStream) grow(n int) int {
 // If the buffer becomes too large, Write will panic with
 // ErrTooLarge.
 func (b *RWStream) Write(p []byte) (n int) {
-    //defer func(){
-		//if x := recover(); x != nil {
-            //fmt.Printf("rwstream write() recover:%s,cap=%d,end=%d,len=%d,newlen=%d\n", x,cap(b.buf), b.end,b.Len(),len(p))
-
-        //panic("write is err!")
-		//}
-    //}()
-
-    //fmt.Printf("2rwstream write(),cap=%d,len(b.buf)=%d,off=%d,end=%d,m=%d,len=%d,newlen=%d\n", cap(b.buf),len(b.buf), b.off, b.end,m,b.Len(),len(p))
     nn := len(p)
     m := b.grow(nn)
     b.end += nn
 
-    //if len(b.buf) > 2000 {
-        //fmt.Printf("1rwstream write(),cap=%d,len(b.buf)=%d,off=%d,end=%d,len=%d,newlen=%d\n", cap(b.buf),len(b.buf), b.off, b.end,b.Len(),len(p))
-        //panic("rwstream.Write() is error:")
-    //}
     return copy(b.buf[m:], p)
 }
 
