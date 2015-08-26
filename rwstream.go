@@ -16,6 +16,9 @@ package gotools
 import (
     "encoding/binary"
     "errors"
+    "sync"
+
+    "fmt"
 )
 
 
@@ -54,15 +57,15 @@ type RWStream struct {
     //Endian   int //default to false, means that is littleEdian
     Endianer IEndianer
 
-    buf []byte // contents are the bytes buf[off:len(buf)]
+    buf []byte
+    rlock *sync.RWMutex
 
-    off  int // read at &buf[off], write at &buf[len(buf)]
-    end  int // data end pos, data = buf[off,end]
-    last int // last read operation, so that Unread* can work correctly.
+    end  int
+    last int
 }
 
 func NewRWStream(buf interface{}, endianer IEndianer) *RWStream {
-    b := &RWStream{Endianer: endianer}
+    b := &RWStream{Endianer: endianer, rlock:new(sync.RWMutex)}
 
     b.Endianer = endianer
     /*
@@ -82,10 +85,29 @@ func NewRWStream(buf interface{}, endianer IEndianer) *RWStream {
 var ErrTooLarge = errors.New("net.RWStream: too large")
 var ErrIndex = errors.New("net.RWStream: index over range")
 
-func (b *RWStream) DebugOut() (string,int,[]byte,int,int,int) { return "rwstream.buf:",len(b.buf),b.buf[:],b.off,b.last,b.end}
-func (b *RWStream) Bytes() []byte { return b.buf[b.off:b.end] }
+func (b *RWStream) DebugOut() (string,int,[]byte,int,int) { return "rwstream.buf:",b.buffSize,b.buf[:],b.last,b.end}
 
-func (b *RWStream) Len() int { return b.end - b.off }
+func (b *RWStream) Bytes() []byte {
+    if b.last <= b.end {
+        p := b.buf[b.last : b.end]
+        return p
+    }
+
+    //分段读取
+    buf := make([]byte, b.Len())
+    copy(buf, b.buf[b.last:])
+    copy(buf[b.buffSize - b.last:], b.buf[:b.end])
+
+    return buf
+}
+
+func (b *RWStream) Len() int {
+    if b.end > b.last {
+        return b.end - b.last
+    } else {
+        return b.buffSize + b.end - b.last
+    }
+}
 
 func (b *RWStream) Init(params ...interface{}) {
     if len(params) > 0 {
@@ -96,120 +118,148 @@ func (b *RWStream) Init(params ...interface{}) {
             b.buffSize = tmp
             b.buf = make([]byte, b.buffSize)
             b.last = 0
-            b.off = 0
             b.end = 0
         case []byte:
             b.buf = tmp[:]
             b.buffSize = len(tmp)
             b.last = 0
-            b.off = 0
             b.end = len(tmp)
         default:
             b.buffSize = 1024
             b.buf = make([]byte, b.buffSize)
             b.last = 0
             b.end = 0
-            b.off = 0
         }
     } else {
         b.last = 0
         b.end = 0
-        b.off = 0
+        b.buffSize = 1024
+        b.buf = make([]byte, b.buffSize)
     }
 }
 
 //call Reset before each use this Buffer
 func (b *RWStream) Reset() {
-    b.off = b.end
-    b.last = b.off
+    b.end = 0
+    b.last = 0
+    b.buffSize = 1024
+    b.buf = make([]byte, b.buffSize)
 }
 
-// makeSlice allocates a slice of size n. If the allocation fails, it panics
-// with ErrTooLarge.
-func makeSlice(n int) []byte {
-    // If the make fails, give a known error.
-    defer func() {
-        if recover() != nil {
-            panic(ErrTooLarge)
-        }
-    }()
-    return make([]byte, n*2)
-}
 
-// grow grows the buffer to guarantee space for n more bytes.
-// It returns the index where bytes should be written.
-// If the buffer can't grow it will panic with ErrTooLarge.
-func (b *RWStream) grow(n int) int {
+func (b *RWStream) Write(p []byte) (i int) {
+    n := len(p)
     m := b.Len()
-    x := len(b.buf)
+    max := b.buffSize
 
-    if b.end+n > x {
-        if m+n > x {
-            var buf []byte
-            // not enough space anywhere
-            buf = makeSlice(m + n)
-            copy(buf, b.buf[b.off:])
-            b.buf = buf
-        } else {
-            copy(b.buf[0:], b.buf[b.off:b.off+m])
-        }
-        b.last -= b.off
-        b.off = 0
-        b.end = m
-    //} else {
-        //if x > b.buffSize {
-            //b.buf = b.buf[b.off : b.off+m]
-            //b.last -= b.off
-            //b.off = 0
-            //b.end = m
-        //}
+    if b.end + n <= max {
+        copy(b.buf[b.end:], p)
+        b.end = (b.end + n) % max
+        return n
     }
-    return b.end
+
+    if m + n > max {
+        b.rlock.Lock()
+        // not enough space anywhere
+        //icap := m + n - max
+        icap := m + n
+        if icap < 10240 {
+            icap = icap * 2
+        }
+        fmt.Printf("makeslice makeslice makeslice", b.last,b.end, icap,n, "\n")
+        tmp := make([]byte, icap)
+        //tmp := make([]byte, icap + max)
+        if b.last < b.end {
+            copy(tmp, b.buf[b.last:b.end])
+        } else {
+            copy(tmp, b.buf[b.last:b.buffSize])
+            copy(tmp[b.buffSize - b.last:], b.buf[:b.end])
+        }
+        copy(tmp[m:], p)
+
+        fmt.Printf("|||% X\n",b.buf)
+        fmt.Printf("|||% X\n",tmp)
+
+        b.buffSize = len(tmp)
+        b.last = 0
+        b.end = n + m
+        b.buf = tmp
+        b.rlock.Unlock()
+
+        return n
+    }
+
+    if b.last > b.end {
+        copy(b.buf[b.end:], p)
+        b.end = (b.end + n) % max
+        return n
+    }
+
+    //分段写入
+    copy(b.buf[b.end:], p[:max - b.end])
+    copy(b.buf[0:], p[max - b.end:])
+    b.end = n + b.end - max
+
+    return n
 }
 
-// Write appends the contents of p to the buffer.  The return
-// value n is the length of p; err is always nil.
-// If the buffer becomes too large, Write will panic with
-// ErrTooLarge.
-func (b *RWStream) Write(p []byte) (n int) {
-    nn := len(p)
-    m := b.grow(nn)
-    b.end += nn
+func (b *RWStream) Read(n int) ([]byte,int) {
+    end := b.end
+    if b.last <= b.end {
+        if b.last + n <= end {
+            p := b.buf[b.last : b.last+n]
+            b.last += n
+            return p, n
+        } else {
+            return nil,0
+        }
+    }
 
-    return copy(b.buf[m:], p)
+    max := b.buffSize
+    if b.last + n < max {
+        p := b.buf[b.last : b.last+n]
+        b.last += n
+        return p, n
+    }
+
+    if b.last + n > b.end + max {
+        return nil,0
+    }
+
+    //分段读取
+    buf := make([]byte, n)
+    copy(buf, b.buf[b.last:])
+    copy(buf[max - b.last:], b.buf[:n + b.last - max])
+    b.last = n - max + b.last
+
+    return buf, n
 }
 
 func (b *RWStream) GetPos() int {
-    return b.last - b.off
+    return b.last
 }
 
 func (b *RWStream) SetPos(pos int) {
     if pos < 0 {
         b.last += pos
-        if b.last < b.off {
-            b.last = b.off
+        if b.last < 0 {
+            b.last += b.buffSize
         }
         return
     }
 
-    if pos+b.off > b.end {
+    if b.end < b.last {
+        la := (b.last + pos) % b.buffSize
+        if la > b.end {
+            b.last = b.end
+        } else {
+            b.last = la
+        }
+    } else if b.last + pos > b.end {
         b.last = b.end
     } else {
-        b.last = pos + b.off
+        b.last += pos
     }
-}
-
-func (b *RWStream) Read(n int) ([]byte,int) {
-    if b.last+n > b.end {
-        return nil,0
-        //n = b.end - b.last
-    }
-    //if n<0 {
-    //    return 0,nil
-    //}
-    p := b.buf[b.last : b.last+n]
-    b.last += n
-    return p, n
 }
 
 // WriteString appends the contents of s to the buffer.  The return
@@ -228,9 +278,7 @@ func (b *RWStream) WriteStringU32(s string) int {
 
 
 func (b *RWStream) WriteByte(c byte) int {
-    m := b.grow(1)
-    b.buf[m] = c
-    b.end += 1
+    b.Write([]byte{c})
     return 1
 }
 
@@ -288,7 +336,7 @@ func (b *RWStream) ReadUint64() (uint64, error) {
 }
 
 func (b *RWStream) ReadUint() (uint, error) {
-    if b.last >= b.end {
+    if b.Len() < 1 {
         return 0, ErrIndex
     }
 
@@ -307,7 +355,7 @@ func (b *RWStream) ReadUint() (uint, error) {
             }
             return x | uint(b)<<s, nil
         }
-        x |= uint(b&0x7f) << s
+        x |= uint(b & 0x7f) << s
         s += 7
         i += 1
     }
