@@ -27,8 +27,8 @@ const (
     LittleEndian = 1
 )
 
-func GetEndianer(endian int) IEndianer {
-    if endian == BigEndian {
+func GetEndianer(writePointian int) IEndianer {
+    if writePointian == BigEndian {
         return binary.BigEndian
     } else {
         return binary.LittleEndian
@@ -52,7 +52,8 @@ type IEndianer interface {
 // A Buffer is a variable-sized buffer of bytes with Read and Write methods.
 // The zero value for Buffer is an empty buffer ready to use.
 type RWStream struct {
-    buffSize int
+    bufSize int
+    initSize int
 
     //Endian   int //default to false, means that is littleEdian
     Endianer IEndianer
@@ -60,17 +61,17 @@ type RWStream struct {
     buf []byte
     rlock *sync.RWMutex
 
-    end  int
-    last int
+    writePoint  int
+    readPoint int
 }
 
-func NewRWStream(buf interface{}, endianer IEndianer) *RWStream {
-    b := &RWStream{Endianer: endianer, rlock:new(sync.RWMutex)}
+func NewRWStream(buf interface{}, writePointianer IEndianer) *RWStream {
+    b := &RWStream{Endianer: writePointianer, rlock:new(sync.RWMutex)}
 
-    b.Endianer = endianer
+    b.Endianer = writePointianer
     /*
-    b.Endian = endian
-    if endian == BigEndian {
+    b.Endian = writePointian
+    if writePointian == BigEndian {
         b.Endianer = binary.BigEndian
     } else {
         b.Endianer = binary.LittleEndian
@@ -85,27 +86,29 @@ func NewRWStream(buf interface{}, endianer IEndianer) *RWStream {
 var ErrTooLarge = errors.New("net.RWStream: too large")
 var ErrIndex = errors.New("net.RWStream: index over range")
 
-func (b *RWStream) DebugOut() (string,int,[]byte,int,int) { return "rwstream.buf:",b.buffSize,b.buf[:],b.last,b.end}
+func (b *RWStream) DebugOut() (string,int,[]byte,int,int) { return "rwstream.buf:",b.bufSize,b.buf[:],b.readPoint,b.writePoint}
 
 func (b *RWStream) Bytes() []byte {
-    if b.last <= b.end {
-        p := b.buf[b.last : b.end]
+    Trace("Bytes() read:%d, %d, %d", b.readPoint, b.writePoint, b.bufSize)
+    if b.readPoint <= b.writePoint {
+        p := b.buf[b.readPoint : b.writePoint]
         return p
     }
 
+    Trace("Bytes() segment read")
     //分段读取
     buf := make([]byte, b.Len())
-    copy(buf, b.buf[b.last:])
-    copy(buf[b.buffSize - b.last:], b.buf[:b.end])
+    copy(buf, b.buf[b.readPoint:])
+    copy(buf[b.bufSize - b.readPoint:], b.buf[:b.writePoint])
 
     return buf
 }
 
 func (b *RWStream) Len() int {
-    if b.end > b.last {
-        return b.end - b.last
+    if b.writePoint >= b.readPoint {
+        return b.writePoint - b.readPoint
     } else {
-        return b.buffSize + b.end - b.last
+        return b.bufSize + b.writePoint - b.readPoint
     }
 }
 
@@ -115,154 +118,146 @@ func (b *RWStream) Init(params ...interface{}) {
 
         switch tmp := buf.(type) {
         case int:
-            b.buffSize = tmp
-            b.buf = make([]byte, b.buffSize)
-            b.last = 0
-            b.end = 0
+            b.initSize = tmp
+            b.bufSize = tmp
+            b.buf = make([]byte, b.bufSize)
+            b.readPoint = 0
+            b.writePoint = 0
         case []byte:
             b.buf = tmp[:]
-            b.buffSize = len(tmp)
-            b.last = 0
-            b.end = len(tmp)
+            b.initSize = len(tmp)
+            b.bufSize = b.initSize
+            b.readPoint = 0
+            b.writePoint = len(tmp)
         default:
-            b.buffSize = 1024
-            b.buf = make([]byte, b.buffSize)
-            b.last = 0
-            b.end = 0
+            b.initSize = 20480
+            b.bufSize = 20480
+            b.buf = make([]byte, b.bufSize)
+            b.readPoint = 0
+            b.writePoint = 0
         }
     } else {
-        b.last = 0
-        b.end = 0
-        b.buffSize = 1024
-        b.buf = make([]byte, b.buffSize)
+        b.readPoint = 0
+        b.writePoint = 0
+        b.initSize = 20480
+        b.bufSize = 20480
+        b.buf = make([]byte, b.bufSize)
     }
 }
 
 //call Reset before each use this Buffer
 func (b *RWStream) Reset() {
-    b.end = 0
-    b.last = 0
-    b.buffSize = 1024
-    b.buf = make([]byte, b.buffSize)
+    b.writePoint = 0
+    b.readPoint = 0
+    b.bufSize = b.initSize
+    b.buf = make([]byte, b.bufSize)
 }
 
 
 func (b *RWStream) Write(p []byte) (i int) {
     n := len(p)
     m := b.Len()
-    max := b.buffSize
+    max := b.bufSize
 
-    if b.end + n <= max {
-        copy(b.buf[b.end:], p)
-        b.end = (b.end + n) % max
-        return n
-    }
-
-    if m + n > max {
+    if m + n >= max {
+        //是否需要扩展环容量
         b.rlock.Lock()
         // not enough space anywhere
         //icap := m + n - max
         icap := m + n
-        if icap < 10240 {
+        if icap < 20480 {
             icap = icap * 2
         }
-        fmt.Printf("makeslice makeslice makeslice", b.last,b.end, icap,n, "\n")
+        Trace("makeslice:readPoint:%d,writePoint:%d,icap:%d,m:%d,n:%d", b.readPoint,b.writePoint,icap,m,n)
         tmp := make([]byte, icap)
         //tmp := make([]byte, icap + max)
-        if b.last < b.end {
-            copy(tmp, b.buf[b.last:b.end])
+        if b.readPoint < b.writePoint {
+            copy(tmp, b.buf[b.readPoint:b.writePoint])
         } else {
-            copy(tmp, b.buf[b.last:b.buffSize])
-            copy(tmp[b.buffSize - b.last:], b.buf[:b.end])
+            copy(tmp, b.buf[b.readPoint:max])
+            copy(tmp[max - b.readPoint:], b.buf[:b.writePoint])
         }
         copy(tmp[m:], p)
 
         fmt.Printf("|||% X\n",b.buf)
         fmt.Printf("|||% X\n",tmp)
 
-        b.buffSize = len(tmp)
-        b.last = 0
-        b.end = n + m
+        b.bufSize = len(tmp)
+        b.readPoint = 0
+        b.writePoint = n + m
         b.buf = tmp
         b.rlock.Unlock()
 
         return n
     }
 
-    if b.last > b.end {
-        copy(b.buf[b.end:], p)
-        b.end = (b.end + n) % max
+    if b.writePoint + n <= max {
+        copy(b.buf[b.writePoint:], p)
+        Trace("rwstream.write one:%d, %d, %d", b.writePoint, n, max)
+        b.writePoint = (b.writePoint + n) % max
         return n
     }
 
     //分段写入
-    copy(b.buf[b.end:], p[:max - b.end])
-    copy(b.buf[0:], p[max - b.end:])
-    b.end = n + b.end - max
+    Trace("rwstream.write segment", max)
+    copy(b.buf[b.writePoint:], p[:max - b.writePoint])
+    copy(b.buf[0:], p[max - b.writePoint:])
+    b.writePoint = n + b.writePoint - max
 
     return n
 }
 
 func (b *RWStream) Read(n int) ([]byte,int) {
-    end := b.end
-    if b.last <= b.end {
-        if b.last + n <= end {
-            p := b.buf[b.last : b.last+n]
-            b.last += n
-            return p, n
-        } else {
-            return nil,0
-        }
-    }
-
-    max := b.buffSize
-    if b.last + n < max {
-        p := b.buf[b.last : b.last+n]
-        b.last += n
-        return p, n
-    }
-
-    if b.last + n > b.end + max {
+    if n==0 || b.Len() < n {
         return nil,0
     }
 
+    max := b.bufSize
+    writePoint := b.writePoint
+    if b.readPoint < writePoint || b.readPoint + n <= max {
+        p := b.buf[b.readPoint : b.readPoint+n]
+        b.readPoint += n
+        return p, n
+    }
+
     //分段读取
+    Trace("read segment", b.readPoint, n, b.writePoint, max)
     buf := make([]byte, n)
-    copy(buf, b.buf[b.last:])
-    copy(buf[max - b.last:], b.buf[:n + b.last - max])
-    b.last = n - max + b.last
+    copy(buf, b.buf[b.readPoint:])
+    copy(buf[max - b.readPoint:], b.buf[:n + b.readPoint - max])
+    b.readPoint = n - max + b.readPoint
 
     return buf, n
 }
 
 func (b *RWStream) GetPos() int {
-    return b.last
+    return b.readPoint
 }
 
 func (b *RWStream) SetPos(pos int) {
     if pos < 0 {
-        b.last += pos
-        if b.last < 0 {
-            b.last += b.buffSize
+        b.readPoint += pos
+        if b.readPoint < 0 {
+            b.readPoint += b.bufSize
         }
         return
     }
 
-    if b.end < b.last {
-        la := (b.last + pos) % b.buffSize
-        if la > b.end {
-            b.last = b.end
+    if b.writePoint < b.readPoint {
+        la := (b.readPoint + pos) % b.bufSize
+        if la > b.writePoint {
+            b.readPoint = b.writePoint
         } else {
-            b.last = la
+            b.readPoint = la
         }
-    } else if b.last + pos > b.end {
-        b.last = b.end
+    } else if b.readPoint + pos > b.writePoint {
+        b.readPoint = b.writePoint
     } else {
-        b.last += pos
+        b.readPoint += pos
     }
 }
 
-// WriteString appends the contents of s to the buffer.  The return
+// WriteString appwritePoints the contents of s to the buffer.  The return
 // value n is the length of s; err is always nil.
 // If the buffer becomes too large, WriteString will panic with
 // ErrTooLarge.

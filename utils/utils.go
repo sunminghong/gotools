@@ -24,3 +24,10 @@ func PutUVarint(x uint) []byte {
     return buf[0 : i+1]
 }
 
+func Clone(old []byte) []byte {
+    newdata := make([]byte, len(old))
+    copy(newdata, old)
+
+    return newdata
+}
+
